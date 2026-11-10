@@ -1411,8 +1411,8 @@ class DSV4PoolConfigurator(MemoryPoolConfigurator):
             assert num_draft_tokens <= max_draft_tokens, (
                 f"speculative_num_draft_tokens={num_draft_tokens} exceeds what the c{compress_ratio} "
                 f"compress state ring can keep resident (ring_size={ring_size} serves at most "
-                f"{max_draft_tokens} draft tokens). Lower the draft count, or grow the ring in "
-                f"get_compress_state_ring_size()."
+                f"{max_draft_tokens} draft tokens). Lower the draft count, or grow "
+                "the ring (--speculative-dsv4-c4-ring for c4)."
             )
 
     def _resolve_swa_prefix_tails(self) -> int:

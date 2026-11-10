@@ -65,8 +65,12 @@ def get_dsv4_indexer_bytes_per_token(index_head_dim: int, use_fp4_indexer: bool)
     return index_head_dim + index_head_dim // 128 * 4
 
 
-def get_compress_state_ring_size(compress_ratio: int, num_draft_tokens: int = 0) -> int:
-    """Rows per request ring; num_draft_tokens == 0 means no speculative decoding."""
+def get_compress_state_ring_size(
+    compress_ratio: int, num_draft_tokens: int = 0, c4_spec_ring: int = 16
+) -> int:
+    """Rows per request ring; num_draft_tokens == 0 means no speculative decoding.
+    ``c4_spec_ring`` is --speculative-dsv4-c4-ring: the C4 ring under speculation,
+    which bounds the draft tokens a verify may write (get_compress_state_write_pad)."""
     assert compress_ratio in [2, 4, 128], f"Unsupported {compress_ratio = }"
     is_speculative = num_draft_tokens > 0
     if compress_ratio == 2:
@@ -82,7 +86,7 @@ def get_compress_state_ring_size(compress_ratio: int, num_draft_tokens: int = 0)
             raise AssertionError("online c128 does not support MTP")
         return 1
     if is_speculative:
-        return 16 if compress_ratio == 4 else 256
+        return c4_spec_ring if compress_ratio == 4 else 256
     else:
         return 8 if compress_ratio == 4 else 128
 
@@ -96,7 +100,9 @@ def resolve_compress_state_ring_size(compress_ratio: int) -> int:
         if spec.speculative_algorithm is None
         else spec.speculative_num_draft_tokens or 0
     )
-    return get_compress_state_ring_size(compress_ratio, num_draft_tokens)
+    return get_compress_state_ring_size(
+        compress_ratio, num_draft_tokens, int(spec.speculative_dsv4_c4_ring)
+    )
 
 
 def collect_sources_by_ratio(

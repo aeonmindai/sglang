@@ -35,6 +35,20 @@ class TestCompressStateWritePad(CustomTestCase):
                     get_compress_state_write_pad(compress_ratio, ring_size), expected
                 )
 
+    def test_c4_ring_32_serves_26_draft_tokens(self):
+        """--speculative-dsv4-c4-ring 32 widens only the speculative C4 ring."""
+        for c4_ring, expected in ((16, 10), (32, 26)):
+            ring_size = get_compress_state_ring_size(
+                4, num_draft_tokens=4, c4_spec_ring=c4_ring
+            )
+            with self.subTest(ring=ring_size):
+                self.assertEqual(ring_size, c4_ring)
+                self.assertEqual(get_compress_state_write_pad(4, ring_size), expected)
+        self.assertEqual(get_compress_state_ring_size(4, c4_spec_ring=32), 8)
+        self.assertEqual(
+            get_compress_state_ring_size(128, num_draft_tokens=4, c4_spec_ring=32), 256
+        )
+
     def test_pad_is_zero_for_rings_below_one_window(self):
         """Online c128 collapses the ring to 1; the pad must clamp instead of going
         negative."""

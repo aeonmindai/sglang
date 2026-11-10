@@ -106,6 +106,12 @@ class Spec(msgspec.Struct):
         "it into extra real verification at the same step time. Off by default; when "
         "off the schedule is byte-for-byte unchanged.",
     ] = False
+    speculative_dsv4_c4_ring: A[
+        Literal[16, 32],
+        "DeepSeek-V4 under speculative decoding: rows per request of the C4 compress "
+        "state ring. The ring bounds the verify width at ring - 8 + 2 (16 serves 10 "
+        "rows, 32 serves 26) and costs C4 state memory linearly.",
+    ] = 16
     speculative_accept_threshold_single: A[
         float,
         "Accept a draft token if its probability in the target model is greater than this threshold.",

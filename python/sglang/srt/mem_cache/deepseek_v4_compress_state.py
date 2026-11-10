@@ -89,7 +89,8 @@ def c4_state_transfer_indices(
     ring_size: int,
 ) -> np.ndarray:
     """PD transfer rows of the overlap C4 state: the live tail of the request's ring."""
-    # Prefill and decode can have different ring sizes (8 or 16 with EAGLE/MTP);
+    # Prefill and decode can have different ring sizes (8, or 16 / 32 under
+    # speculation, --speculative-dsv4-c4-ring);
     # pair the overlap compressor's live rows by logical token position.
     if ring_size < 8 or ring_size % 4 != 0:
         raise ValueError(

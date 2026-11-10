@@ -2204,5 +2204,56 @@ class TestDSV4LowRatioBudget(CustomTestCase):
                     self.assertEqual(planner._get_low_ratio_kv_padding_bytes(256), 0)
 
 
+class TestDSV4C4RingServesVerifyWidth(CustomTestCase):
+    """--speculative-dsv4-c4-ring bounds the verify width the pool accepts:
+    ring - 2 * 4 + 2 rows, 10 at the default ring 16 and 26 at 32."""
+
+    def _configurator(self, c4_ring):
+        from sglang.srt.mem_cache.deepseek_v4_memory_pool import (
+            get_compress_state_ring_size,
+        )
+        from sglang.srt.model_executor.pool_configurator import DSV4PoolConfigurator
+
+        cfg = object.__new__(DSV4PoolConfigurator)
+        cfg.stage_owner_layers = {4: [1], 128: [2]}
+        cfg.ring_sizes = {
+            4: get_compress_state_ring_size(4, 1, c4_spec_ring=c4_ring),
+            128: get_compress_state_ring_size(128, 1),
+        }
+        return cfg
+
+    def test_ring_bounds_the_draft_count(self):
+        for c4_ring, limit in ((16, 10), (32, 26)):
+            with self.subTest(c4_ring=c4_ring):
+                cfg = self._configurator(c4_ring)
+                self.assertEqual(cfg.ring_sizes[4], c4_ring)
+                cfg._assert_ring_serves_draft_tokens(limit)
+                with self.assertRaisesRegex(
+                    AssertionError, "--speculative-dsv4-c4-ring"
+                ):
+                    cfg._assert_ring_serves_draft_tokens(limit + 1)
+
+    def test_ring_follows_the_published_flag(self):
+        from sglang.srt.mem_cache.deepseek_v4_memory_pool import (
+            resolve_compress_state_ring_size,
+        )
+
+        _publish_config(self, speculative_algorithm=None)
+        self.assertEqual(resolve_compress_state_ring_size(4), 8)
+        _publish_config(
+            self, speculative_algorithm="DSPARK", speculative_num_draft_tokens=6
+        )
+        self.assertEqual(resolve_compress_state_ring_size(4), 16)
+        self.assertEqual(resolve_compress_state_ring_size(128), 256)
+        _publish_config(
+            self,
+            speculative_algorithm="DSPARK",
+            speculative_num_draft_tokens=17,
+            speculative_dsv4_c4_ring=32,
+        )
+        self.assertEqual(resolve_compress_state_ring_size(4), 32)
+        self.assertEqual(resolve_compress_state_ring_size(128), 256)
+
+
 if __name__ == "__main__":
     unittest.main()
