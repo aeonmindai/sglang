@@ -1452,6 +1452,15 @@ class DeepseekV4AttnBackend(
         )
 
         self.is_dspark_draft = model_runner.is_draft_worker and spec_alg.is_dspark()
+        # The DSpark draft block's rows (gamma): the verify width encodes them
+        # unless --speculative-dspark-verify-width decouples the two.
+        self.dspark_block_size: Optional[int] = (
+            spec_alg.get_num_tokens_per_req_for_target_verify(
+                self.speculative_num_draft_tokens, is_draft_worker=True
+            )
+            if self.is_dspark_draft
+            else None
+        )
         self.is_draft_runner = model_runner.is_draft_worker
         self._verify_mask = None
         self.cuda_graph_swa_out_cache_loc: Optional[torch.Tensor] = None
@@ -2824,7 +2833,7 @@ class DeepseekV4AttnBackend(
                 out_cache_loc=out_cache_loc_padded,
             )
         elif bucket == _GraphBucket.TARGET_VERIFY and self.is_dspark_draft:
-            block_size = self.speculative_num_draft_tokens - 1
+            block_size = self.dspark_block_size
             num_tokens_block = block_size * bs
             assert out_cache_loc is not None
             out_cache_loc_padded = torch.nn.functional.pad(
@@ -5053,13 +5062,11 @@ class DeepseekV4AttnBackend(
             swa_out_cache_loc = request_layout.write_loc
         elif dspark_block_size is not None:
             assert (
-                self.is_dspark_draft
-                and dspark_block_size == self.speculative_num_draft_tokens - 1
+                self.is_dspark_draft and dspark_block_size == self.dspark_block_size
             ), (
-                f"dspark_block_size={dspark_block_size} must equal gamma = "
-                f"speculative_num_draft_tokens-1={self.speculative_num_draft_tokens - 1} "
-                f"and is only valid on the DSpark draft backend "
-                f"(is_dspark_draft={self.is_dspark_draft})."
+                f"dspark_block_size={dspark_block_size} must equal the draft gamma="
+                f"{self.dspark_block_size} and is only valid on the DSpark draft "
+                f"backend (is_dspark_draft={self.is_dspark_draft})."
             )
             assert swa_replay_start is None, (
                 "swa_replay_start is not wired for the DSpark draft window"

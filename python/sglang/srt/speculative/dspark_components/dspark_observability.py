@@ -769,6 +769,15 @@ class DsparkStepObservers:
                 "SGLANG_SIMULATE_ACC_LEN (simulated correct_len breaks the "
                 "accept-probability bookkeeping of the estimator)."
             )
+        if (
+            self._verify_num_draft_tokens != self._gamma + 1
+            and self._block_accept_recorder is not None
+        ):
+            raise ValueError(
+                "SGLANG_DSPARK_BLOCK_ACCEPT_ESTIMATE_PATH cannot be combined with "
+                "--speculative-dspark-verify-width (the estimator models DSpark's "
+                "gamma-token block; the verify chain is longer)."
+            )
         self._sts_collect_path = envs.SGLANG_DSPARK_STS_COLLECT_PATH.get()
         self._sts_recorder: Optional[StsDataRecorder] = None
 

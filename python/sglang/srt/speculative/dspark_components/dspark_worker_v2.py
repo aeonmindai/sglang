@@ -261,6 +261,9 @@ class DSparkWorkerV2(BaseSpecWorker):
         )
         self.gamma = runtime_config.gamma
         self.verify_num_draft_tokens = runtime_config.verify_num_draft_tokens
+        # --speculative-dspark-verify-width: verify chain columns past DSpark's block
+        # (DraftProposal). The draft side keeps gamma, the verify side W - 1.
+        self._num_extension_tokens = self.verify_num_draft_tokens - 1 - self.gamma
         self.sample_from_anchor = bool(self.draft_model.sample_from_anchor)
         self.query_token_num = self.gamma if self.sample_from_anchor else self.gamma + 1
         self.speculative_num_draft_tokens = self.verify_num_draft_tokens
@@ -369,6 +372,12 @@ class DSparkWorkerV2(BaseSpecWorker):
             and markov_head is not None
             and markov_head.vocab_shard is not None
         )
+        if self._sharded_accept and self._num_extension_tokens:
+            raise ValueError(
+                "--speculative-dspark-verify-width does not support the vocab-sharded "
+                "DSpark sampling accept (HIP): it reads a draft logits row per chain "
+                "column, and extension columns have none."
+            )
         if self._sharded_accept and self._target_tp_rank == 0:
             logger.info("DSpark sampling accept runs on the vocab shards.")
         self._proposer = DraftBlockProposer(
@@ -382,16 +391,29 @@ class DSparkWorkerV2(BaseSpecWorker):
             greedy_draft=self._greedy_draft,
             sharded_accept=self._sharded_accept,
             dp_moe_sync=self._draft_is_moe and get_parallel().attn_dp_enabled,
+            num_extension_tokens=self._num_extension_tokens,
         )
         self._verify_epilogue = None
         self._sampling_accept_graph: Optional[DsparkSamplingAcceptGraph] = None
         # Counter-based draws from the server seed: every TP rank draws the same coins,
-        # so no accept broadcast is needed.
+        # so no accept broadcast is needed. Block-wise rejection and the sampling-accept
+        # graph read gamma draft logits rows per request; extension columns have none,
+        # so a wide verify keeps the classic eager accept (_draft_probs).
         self._rejection_noise = (
             make_rejection_noise(self.target_worker.random_seed, self.device)
-            if is_cuda() and envs.SGLANG_OPT_DSV41_BLOCKWISE_REJECTION.get()
+            if is_cuda()
+            and envs.SGLANG_OPT_DSV41_BLOCKWISE_REJECTION.get()
+            and not self._num_extension_tokens
             else None
         )
+        if self._num_extension_tokens and self._target_tp_rank == 0:
+            logger.info(
+                "DSpark verify width %d: gamma=%d draft tokens + %d extension "
+                "columns; block-wise rejection and the sampling-accept graph off.",
+                self.verify_num_draft_tokens,
+                self.gamma,
+                self._num_extension_tokens,
+            )
         target_is_dsv41 = target_model_type(self.target_worker) == "deepseek_v41"
         # SGLANG_OPT_DSV41_TARGET_METADATA_EARLY: the static verify's inputs are final
         # after the head; the target runner stages their metadata beside the draft.
@@ -460,6 +482,7 @@ class DSparkWorkerV2(BaseSpecWorker):
                 envs.SGLANG_OPT_DSV41_SAMPLING_ACCEPT_GRAPH.get()
                 and static_epilogue_supported
                 and is_cuda()
+                and not self._num_extension_tokens
             ):
                 self._sampling_accept_graph = DsparkSamplingAcceptGraph(
                     epilogue=self._verify_epilogue,
@@ -469,6 +492,20 @@ class DSparkWorkerV2(BaseSpecWorker):
                     device=self.device,
                     rejection_noise=self._rejection_noise,
                 )
+        if self._num_extension_tokens:
+            # The verify epilogue's graphs read the chain from its draft-token buffer.
+            self._proposer.attach_chain_tokens_buf(
+                self._verify_epilogue.draft_tokens_buf
+                if self._verify_epilogue is not None
+                else torch.empty(
+                    (
+                        max(get_exec().graph.cuda_graph_config.decode.bs)
+                        * (self.verify_num_draft_tokens - 1),
+                    ),
+                    dtype=torch.int64,
+                    device=self.device,
+                )
+            )
 
         self._simulate_acc_greedy = (
             self._simulate_acc_len > 0 and envs.SGLANG_SIMULATE_ACC_GREEDY.get()
@@ -493,7 +530,7 @@ class DSparkWorkerV2(BaseSpecWorker):
 
         self._verify_executor = TargetVerifyExecutor(
             target_worker=self.target_worker,
-            gamma=self.gamma,
+            gamma=self.verify_num_draft_tokens - 1,
             verify_num_draft_tokens=self.verify_num_draft_tokens,
             model_runner=self.model_runner,
             kv_injector=self._kv_injector,
@@ -708,9 +745,12 @@ class DSparkWorkerV2(BaseSpecWorker):
             greedy_draft=self._greedy_draft,
             tp_sync=self._tp_sync,
             sharded_accept=self._sharded_accept,
+            # A wide verify's chain is longer than the draft block; the proposer
+            # copies the block into the epilogue's buffer (_extend_chain).
             out=(
                 self._verify_epilogue.draft_tokens_buf
                 if self._verify_epilogue is not None
+                and not self._num_extension_tokens
                 else None
             ),
         )

@@ -1721,6 +1721,12 @@ Combining `--enable-response-store` with `--disaggregation-mode=prefill` or `dec
       <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Type: int</td>
     </tr>
     <tr>
+      <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}>`--speculative-dspark-verify-width`</td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>DSPARK only. Verify rows per request W, decoupled from the draft block: the draft still proposes gamma tokens, and the verify chain holds W - 1 draft tokens, of which columns gamma.. are an extension a plugin fills (see DraftProposal in dspark_draft.py). Must be >= gamma + 1; on DeepSeek-V4 it is bounded by the C4 compress ring (see `--speculative-dsv4-c4-ring`). Omit for W = gamma + 1, today's verify.</td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}>`None`</td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>Type: int</td>
+    </tr>
+    <tr>
       <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}>`--speculative-dsv4-c4-ring`</td>
       <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>DeepSeek-V4 under speculative decoding: rows per request of the C4 compress state ring. The ring bounds the verify width at ring - 8 + 2 (16 serves 10 rows, 32 serves 26) and costs C4 state memory linearly.</td>
       <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}>`16`</td>

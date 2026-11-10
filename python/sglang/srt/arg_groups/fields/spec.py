@@ -106,6 +106,15 @@ class Spec(msgspec.Struct):
         "it into extra real verification at the same step time. Off by default; when "
         "off the schedule is byte-for-byte unchanged.",
     ] = False
+    speculative_dspark_verify_width: A[
+        Optional[int],
+        "DSPARK only. Verify rows per request W, decoupled from the draft block: the "
+        "draft still proposes gamma tokens, and the verify chain holds W - 1 draft "
+        "tokens, of which columns gamma.. are an extension a plugin fills (see "
+        "DraftProposal in dspark_draft.py). Must be >= gamma + 1; on DeepSeek-V4 it is "
+        "bounded by the C4 compress ring (see --speculative-dsv4-c4-ring). Omit for "
+        "W = gamma + 1, today's verify.",
+    ] = None
     speculative_dsv4_c4_ring: A[
         Literal[16, 32],
         "DeepSeek-V4 under speculative decoding: rows per request of the C4 compress "

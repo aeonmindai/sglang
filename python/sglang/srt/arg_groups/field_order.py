@@ -561,5 +561,6 @@ POSITIONAL_FIELD_ORDER = (
     "uocr_max_page_tokens",
     "enable_fp4_indexer",
     "speculative_dsv4_c4_ring",
+    "speculative_dspark_verify_width",
 )
 # fmt: on

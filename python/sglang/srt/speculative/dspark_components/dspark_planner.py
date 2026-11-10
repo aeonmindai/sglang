@@ -140,7 +140,11 @@ class DSparkVerifyPlanner:
                 )
 
         self._ragged_verify_mode = read_ragged_verify_mode()
-        self._schedule_cfg = DSparkScheduleConfig(gamma=self.gamma)
+        # The verify chain's draft tokens: gamma, or gamma plus the extension
+        # columns under --speculative-dspark-verify-width.
+        self._schedule_cfg = DSparkScheduleConfig(
+            gamma=self.verify_num_draft_tokens - 1
+        )
         self._budget_planner: Optional[HostConfidenceBudgetPlanner] = None
         self._dynamic_graph_tier = False
         self._dp_tier_gather_enabled = False
@@ -391,20 +395,26 @@ class DSparkVerifyPlanner:
         if self._ragged_verify_mode is RaggedVerifyMode.STATIC:
             return None
         if self._is_verify_all and self._ragged_verify_mode is RaggedVerifyMode.COMPACT:
-            # Verify-all: the uniform layout (or None, past the captured grid)
-            # is constant per (bs, tier); serve it from cache instead of paying
-            # the per-step schedule and its host<->device round-trips.
-            key = (int(req_pool_indices.shape[0]), global_num_reqs)
-            if key not in self._uniform_layout_cache:
-                self._uniform_layout_cache[key] = uniform_ragged_layout(
-                    bs=key[0],
-                    device=device,
-                    verify_num_draft_tokens=self.verify_num_draft_tokens,
-                    ragged_verify_mode=self._ragged_verify_mode,
-                    model_runner=self.model_runner,
-                    tier_num_reqs=global_num_reqs,
-                )
-            return self._uniform_layout_cache[key]
+            if self.verify_num_draft_tokens - 1 > self.gamma:
+                # --speculative-dspark-verify-width: verify-all means every filled
+                # chain column, so each request verifies its own chain length; an
+                # unfilled extension column (confidence 0) is never admitted.
+                budget = admitted_chain_tokens(confidence, self._schedule_cfg)
+            else:
+                # Verify-all: the uniform layout (or None, past the captured grid)
+                # is constant per (bs, tier); serve it from cache instead of paying
+                # the per-step schedule and its host<->device round-trips.
+                key = (int(req_pool_indices.shape[0]), global_num_reqs)
+                if key not in self._uniform_layout_cache:
+                    self._uniform_layout_cache[key] = uniform_ragged_layout(
+                        bs=key[0],
+                        device=device,
+                        verify_num_draft_tokens=self.verify_num_draft_tokens,
+                        ragged_verify_mode=self._ragged_verify_mode,
+                        model_runner=self.model_runner,
+                        tier_num_reqs=global_num_reqs,
+                    )
+                return self._uniform_layout_cache[key]
         verify_lens = self._schedule_verify_lens(
             req_pool_indices=req_pool_indices,
             prefix_lens=prefix_lens,
@@ -882,6 +892,18 @@ class DSparkScheduleConfig(msgspec.Struct):
             )
         if self.survival_eps < 0:
             raise ValueError(f"survival_eps must be >= 0, got {self.survival_eps}.")
+
+
+def admitted_chain_tokens(
+    confidence: Optional[torch.Tensor], cfg: DSparkScheduleConfig
+) -> Optional[int]:
+    """The top-k budget that admits every chain column a verify-all schedule
+    keeps: those whose survival (cumprod of confidence) is >= survival_eps.
+    Feeding it as the budget also sizes the graph tier to the scheduled total."""
+    if confidence is None:
+        return None
+    survival = compute_sort_survival(confidence)[:, : cfg.resolved_max_verify_len()]
+    return int((survival >= cfg.survival_eps).sum())
 
 
 class VerifyBudgetDecision(msgspec.Struct):

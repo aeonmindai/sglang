@@ -1014,8 +1014,13 @@ class DeepseekV4HipRadixBackend(
             assert self.speculative_num_draft_tokens is not None
             assert self.speculative_num_draft_tokens > 1
             # DSpark draft workers verify gamma rows; the server arg keeps the
-            # CUDA-side convention gamma + 1.
-            self.target_verify_num_draft_tokens = self.speculative_num_draft_tokens - 1
+            # CUDA-side verify width (gamma + 1 unless
+            # --speculative-dspark-verify-width decouples them).
+            self.target_verify_num_draft_tokens = (
+                model_runner.spec_algorithm.get_num_tokens_per_req_for_target_verify(
+                    self.speculative_num_draft_tokens, is_draft_worker=True
+                )
+            )
         self._fp8_decode_num_heads = (
             model_runner.model_config.num_attention_heads // get_parallel().attn_tp_size
         )

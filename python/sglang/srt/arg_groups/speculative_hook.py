@@ -241,6 +241,15 @@ def handle_speculative_decoding(server_args: ServerArgs) -> None:
             speculative_draft_sink_size=sink_size,
         )
 
+    if (
+        cfg.speculative_dspark_verify_width is not None
+        and cfg.speculative_algorithm != "DSPARK"
+    ):
+        raise ValueError(
+            "--speculative-dspark-verify-width applies to --speculative-algorithm "
+            f"DSPARK only, got {cfg.speculative_algorithm!r}."
+        )
+
     algo = None
     if cfg.speculative_algorithm is not None:
         from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
@@ -799,6 +808,7 @@ def _handle_dspark(server_args: ServerArgs) -> None:
     from sglang.srt.speculative.dspark_components.dspark_config import (
         DEFAULT_DSPARK_GAMMA,
         read_draft_checkpoint_config,
+        resolve_dspark_verify_width,
     )
 
     draft_config = None
@@ -831,14 +841,29 @@ def _handle_dspark(server_args: ServerArgs) -> None:
                 gamma,
             )
 
+    wide_verify = cfg.speculative_dspark_verify_width is not None
+    if wide_verify and gamma is None:
+        raise ValueError(
+            "--speculative-dspark-verify-width needs the draft block size: set "
+            "--speculative-dspark-block-size (= gamma)."
+        )
     if gamma is not None:
-        verify_window = int(gamma) + 1
+        verify_window = resolve_dspark_verify_width(
+            gamma=int(gamma),
+            verify_width=cfg.speculative_dspark_verify_width,
+            max_verify_width=(
+                _dsv4_c4_ring_verify_width(server_args) if wide_verify else None
+            ),
+        )
         if (
             cfg.speculative_num_draft_tokens is not None
             and int(cfg.speculative_num_draft_tokens) != verify_window
         ):
+            width_source = (
+                "--speculative-dspark-verify-width" if wide_verify else "gamma + 1"
+            )
             raise ValueError(
-                "DSpark speculative_num_draft_tokens must equal gamma + 1 "
+                f"DSpark speculative_num_draft_tokens must equal {width_source} "
                 f"(= {verify_window} for gamma={gamma}), but got "
                 f"speculative_num_draft_tokens={cfg.speculative_num_draft_tokens}."
             )
@@ -847,6 +872,14 @@ def _handle_dspark(server_args: ServerArgs) -> None:
             "_handle_dspark",
             speculative_num_draft_tokens=verify_window,
         )
+        if wide_verify:
+            # speculative_num_draft_tokens no longer encodes gamma; the draft side
+            # reads it here (dspark_config.dspark_draft_gamma).
+            declare_resolution(
+                server_args,
+                "_handle_dspark",
+                speculative_dspark_block_size=int(gamma),
+            )
 
     if cfg.speculative_num_draft_tokens is None:
         raise ValueError(
@@ -891,6 +924,34 @@ def _handle_dspark(server_args: ServerArgs) -> None:
             "scheduler, which is off under SGLANG_RAGGED_VERIFY_MODE=static; it "
             "will be a no-op."
         )
+    if wide_verify and ragged_mode is RaggedVerifyMode.STATIC:
+        logger.warning(
+            "--speculative-dspark-verify-width=%d under SGLANG_RAGGED_VERIFY_MODE="
+            "static verifies all %d rows of every request, filled or not; "
+            "SGLANG_RAGGED_VERIFY_MODE=compact verifies only the rows the "
+            "confidence budget admits.",
+            cfg.speculative_num_draft_tokens,
+            cfg.speculative_num_draft_tokens,
+        )
+
+
+def _dsv4_c4_ring_verify_width(server_args: ServerArgs) -> Optional[int]:
+    """The verify rows DeepSeek-V4's C4 compress ring serves under
+    --speculative-dsv4-c4-ring; None for targets without ratio-4 layers."""
+    from sglang.srt.configs.model_config import is_deepseek_v4
+
+    hf_config = model_config_of(server_args).hf_config
+    if not is_deepseek_v4(hf_config) or 4 not in (
+        getattr(hf_config, "compress_ratios", None) or ()
+    ):
+        return None
+    from sglang.srt.mem_cache.deepseek_v4_memory_pool import (
+        get_compress_state_write_pad,
+    )
+
+    return get_compress_state_write_pad(
+        4, int(resolving_view(server_args).speculative_dsv4_c4_ring)
+    )
 
 
 def _keep_mla_draft_off_trtllm_mha(

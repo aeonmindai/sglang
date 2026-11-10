@@ -77,10 +77,35 @@ class DraftForwardResult(msgspec.Struct, frozen=True):
 
 
 class DraftProposal(msgspec.Struct, frozen=True):
+    """One step's verify chain per request: the anchor, then the draft tokens.
+
+    With --speculative-dspark-verify-width W > gamma + 1 the chain holds W - 1
+    draft tokens: DSpark's gamma, then ``DraftBlockProposer.num_extension_tokens``
+    (W - 1 - gamma) extension columns, which the proposer resets every step to
+    token 0 at confidence 0 and a plugin may fill in place (an AROUND hook on
+    DraftBlockProposer.propose). For request row i and chain column j a plugin
+    writes:
+
+    - ``draft_block.draft_tokens[i, j]``: every token it proposes;
+    - ``draft_block.corrected_logits[i, j]``, only for j < gamma and only when it
+      is not None and ``greedy_draft`` is False: one-hot (0 at the token, -inf
+      elsewhere), since those rows are DSpark's draft distribution q. Columns
+      j >= gamma have no logits row; the accept takes them as deterministic
+      drafts (q one-hot at the token), so the sampled accept stays exact;
+    - ``confidence[i, j]`` when not None: the per-position acceptance estimate the
+      ragged-verify planner multiplies into survival; an extension column left at
+      0 is never scheduled under SGLANG_RAGGED_VERIFY_MODE=compact.
+
+    Verify accepts a prefix, so the columns before a filled one must hold the
+    chain the plugin means. ``verify_ids`` is None then, and the worker builds
+    ``[anchor | draft_tokens]`` after propose returns, plugin writes included.
+    """
+
     draft_block_ids: torch.Tensor
     draft_block: DraftBlockResult
-    # [bs, gamma]; None when the draft has no confidence head.
+    # [bs, gamma] (or [bs, W - 1], extension included); None without a confidence head.
     confidence: Optional[torch.Tensor] = None
+    # [bs, gamma]: DSpark's own positions only.
     confidence_raw: Optional[torch.Tensor] = None
     folded: bool = False
     # [bs, gamma + 1] ``[anchor | draft tokens]`` from the draft graph tail; None
@@ -361,6 +386,7 @@ class DraftBlockProposer:
         greedy_draft: bool,
         sharded_accept: bool = False,
         dp_moe_sync: bool = False,
+        num_extension_tokens: int = 0,
     ) -> None:
         self.draft_model = draft_model
         self.draft_model_runner = draft_model_runner
@@ -405,6 +431,12 @@ class DraftBlockProposer:
             if enable_num_token_non_padded()
             else None
         )
+        # --speculative-dspark-verify-width: chain columns past gamma (DraftProposal).
+        self.num_extension_tokens = int(num_extension_tokens)
+        # Flat [max_bs * (gamma + num_extension_tokens)] chain tokens; the worker
+        # attaches the verify epilogue's draft-token buffer, which its graphs read.
+        self._chain_tokens_buf: Optional[torch.Tensor] = None
+        self._chain_confidence_buf: Optional[torch.Tensor] = None
 
     @property
     def noise(self) -> DraftNoise:
@@ -412,6 +444,9 @@ class DraftBlockProposer:
 
     def attach_draft_sampler(self, draft_sampler) -> None:
         self._draft_sampler = draft_sampler
+
+    def attach_chain_tokens_buf(self, buf: torch.Tensor) -> None:
+        self._chain_tokens_buf = buf
 
     def _stage_sampling_params(self, draft_sampler, *, bs: int, sampling_info) -> None:
         """The draft graph's sampling params, restaged only when the sampler, bs or
@@ -532,13 +567,47 @@ class DraftBlockProposer:
             if self.sample_from_anchor
             else draft_block_ids[:, : self.gamma].contiguous()
         )
-        return DraftProposal(
+        proposal = DraftProposal(
             draft_block_ids=proposal_block_ids,
             draft_block=draft_block,
             confidence=confidence,
             confidence_raw=confidence_raw,
             folded=folded,
             verify_ids=verify_ids,
+        )
+        if self.num_extension_tokens:
+            return self._extend_chain(proposal, bs=bs)
+        return proposal
+
+    def _extend_chain(self, proposal: DraftProposal, *, bs: int) -> DraftProposal:
+        """DSpark's block followed by the reset extension columns (DraftProposal)."""
+        gamma = self.gamma
+        width = gamma + self.num_extension_tokens
+        block = proposal.draft_block
+        device = block.draft_tokens.device
+        buf = self._chain_tokens_buf
+        if buf is None or buf.numel() < bs * width:
+            # Past the verify epilogue's batch sizes: no graph reads this step's chain.
+            buf = torch.empty((bs * width,), dtype=torch.int64, device=device)
+        tokens = buf[: bs * width].view(bs, width)
+        tokens[:, :gamma].copy_(block.draft_tokens)
+        tokens[:, gamma:].zero_()
+        confidence = proposal.confidence
+        if confidence is not None:
+            conf_buf = self._chain_confidence_buf
+            if conf_buf is None or conf_buf.shape[0] < bs:
+                conf_buf = torch.empty(
+                    (bs, width), dtype=confidence.dtype, device=confidence.device
+                )
+                self._chain_confidence_buf = conf_buf
+            confidence = conf_buf[:bs]
+            confidence[:, :gamma].copy_(proposal.confidence)
+            confidence[:, gamma:].zero_()
+        return msgspec.structs.replace(
+            proposal,
+            draft_block=msgspec.structs.replace(block, draft_tokens=tokens),
+            confidence=confidence,
+            verify_ids=None,
         )
 
     def run_idle_participation(self, batch: ScheduleBatch) -> None:

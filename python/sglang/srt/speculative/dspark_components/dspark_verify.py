@@ -1297,6 +1297,15 @@ def _draft_probs(draft_block: DraftBlockResult, vocab: int, device) -> torch.Ten
         temperatures=draft_block.temperatures,
         rows_per_request=gamma_rows,
     ).view(bs, gamma_rows, vocab)
+    extension_tokens = draft_block.draft_tokens[:, gamma_rows:]
+    if extension_tokens.shape[1]:
+        # --speculative-dspark-verify-width: the chain's columns past DSpark's block
+        # are deterministic extension tokens, so their draft distribution is one-hot.
+        extension_probs = torch.zeros(
+            (*extension_tokens.shape, vocab), dtype=draft_probs.dtype, device=device
+        )
+        extension_probs.scatter_(-1, extension_tokens.unsqueeze(-1), 1.0)
+        draft_probs = torch.cat([draft_probs, extension_probs], dim=1)
     expect(_VERIFY_DRAFT_PROBS, draft_probs)
     return draft_probs
 

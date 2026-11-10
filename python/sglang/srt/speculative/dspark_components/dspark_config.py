@@ -48,14 +48,37 @@ def draft_uses_compressed_kv_attention() -> bool:
     return draft_hf_config is not None and uses_compressed_kv_attention(draft_hf_config)
 
 
-def dspark_gamma_from_num_draft_tokens(num_draft_tokens: int) -> int:
-    gamma = int(num_draft_tokens) - 1
-    if gamma < 1:
+def dspark_draft_gamma(num_draft_tokens: int) -> int:
+    """DSpark's draft block size under a verify width of ``num_draft_tokens``.
+
+    The width is gamma + 1 unless --speculative-dspark-verify-width decouples
+    the two; _handle_dspark then resolves --speculative-dspark-block-size."""
+    spec = get_spec()
+    if spec.speculative_dspark_verify_width is None:
+        return int(num_draft_tokens) - 1
+    return int(spec.speculative_dspark_block_size)
+
+
+def resolve_dspark_verify_width(
+    *, gamma: int, verify_width: Optional[int], max_verify_width: Optional[int]
+) -> int:
+    """Verify rows per request: gamma + 1, or --speculative-dspark-verify-width,
+    which must hold DSpark's block and fit ``max_verify_width`` (the rows
+    DeepSeek-V4's C4 compress ring serves; None for targets without one)."""
+    if verify_width is None:
+        return gamma + 1
+    if verify_width < gamma + 1:
         raise ValueError(
-            "DSpark speculative_num_draft_tokens must be >= 2 (= gamma + 1), "
-            f"got {num_draft_tokens}."
+            f"--speculative-dspark-verify-width={verify_width} cannot hold DSpark's "
+            f"block: it must be >= gamma + 1 = {gamma + 1}."
         )
-    return gamma
+    if max_verify_width is not None and verify_width > max_verify_width:
+        raise ValueError(
+            f"--speculative-dspark-verify-width={verify_width} exceeds the "
+            f"{max_verify_width} verify rows the DeepSeek-V4 C4 compress ring serves; "
+            "raise --speculative-dsv4-c4-ring (32 serves 26) or lower the width."
+        )
+    return verify_width
 
 
 class DSparkDraftConfig(msgspec.Struct, frozen=True):
@@ -89,8 +112,9 @@ def resolve_runtime_config(
     target_vocab_size: int,
 ) -> DSparkRuntimeConfig:
     """Resolve and validate the worker-facing DSpark runtime knobs (gamma,
-    verify window, mask token) from the draft checkpoint config, with
-    server_args.speculative_num_draft_tokens taking precedence for gamma."""
+    verify window, mask token) from the draft checkpoint config, with the server
+    args taking precedence for gamma (dspark_draft_gamma); the verify window is
+    server_args.speculative_num_draft_tokens."""
     draft_config = parse_dspark_draft_config(draft_hf_config=draft_hf_config)
     if not draft_config.require_markov():
         raise ValueError(
@@ -106,11 +130,16 @@ def resolve_runtime_config(
                 "speculative_num_draft_tokens is unset."
             )
     else:
-        gamma = dspark_gamma_from_num_draft_tokens(int(speculative_num_draft_tokens))
+        gamma = dspark_draft_gamma(int(speculative_num_draft_tokens))
+        if gamma < 1:
+            raise ValueError(
+                "DSpark speculative_num_draft_tokens must be >= 2 (= gamma + 1), "
+                f"got {speculative_num_draft_tokens}."
+            )
         config_gamma = draft_config.resolve_gamma(default=None)
         if config_gamma is not None and int(config_gamma) != gamma:
             logger.warning(
-                "DSpark gamma mismatch: using gamma=%s (from "
+                "DSpark gamma mismatch: using gamma=%s (from the server args, "
                 "speculative_num_draft_tokens=%s) but draft config block_size=%s.",
                 gamma,
                 speculative_num_draft_tokens,
@@ -130,7 +159,11 @@ def resolve_runtime_config(
 
     return DSparkRuntimeConfig(
         gamma=gamma,
-        verify_num_draft_tokens=gamma + 1,
+        verify_num_draft_tokens=(
+            gamma + 1
+            if speculative_num_draft_tokens is None
+            else int(speculative_num_draft_tokens)
+        ),
         mask_token_id=mask_token_id,
     )
 

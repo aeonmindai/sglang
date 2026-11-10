@@ -296,7 +296,11 @@ class SpeculativeAlgorithm(Enum):
         # other cases which is not target verify but fixed length prefill.
         # Here, we expose this interface to allow the other use cases.
         if self.is_dspark() and is_draft_worker:
-            return num_draft_tokens - 1
+            from sglang.srt.speculative.dspark_components.dspark_config import (
+                dspark_draft_gamma,
+            )
+
+            return dspark_draft_gamma(num_draft_tokens)
         return num_draft_tokens
 
     def get_platform_worker_cls(self) -> Optional[type]:
